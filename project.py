@@ -94,6 +94,12 @@ def timestamp_to_str(tstamp):
     return utcdttime
 
 
+def date_time_stamp_to_str(tstamp):
+    utcdttime = datetime.utcfromtimestamp(tstamp / 1000)
+    utcdttime = utcdttime.strftime('%Y-%m-%d, %H:%M:%S')  # H is in 24 hour clock
+    return utcdttime
+
+
 # Add Tweet DateTime in Unix epoch time format
 df_data['DateTimeUnix'] = df_data.apply(lambda row: ta.find_tweet_timestamp(row['tweet_id']), axis=1)
 
@@ -346,11 +352,8 @@ embedding_model_id = 'roberta-base-nli-stsb-mean-tokens'
 
 # Define models and parameters for the NLP pipeline
 # Add to the stopwords
-stopwords_custom = list(stopwords.words('english')) + ['http',
-                                                       'https',
-                                                       'amp',
-                                                       'com',
-                                                       'rt']
+stopwords_additions = ['http','https','amp','com','rt']
+stopwords_custom = list(stopwords.words('english')) + stopwords_additions
 
 # Load sentence transformer model for the embeddings
 embedding_model = SentenceTransformer(embedding_model_id)
@@ -549,61 +552,57 @@ df_topics_probs.columns = ['Topic', 'Probability']
 df_data_full = pd.concat([df_data,df_topics_probs],axis = 1)
 
 # For each tweet, add the sub-topic and sub-topic probability
-topics_over_time['keywords'] = topics_over_time['Words'].map(lambda x: x.replace(',',''))
-topics_over_time['topic_vector'] = topics_over_time['keywords'].apply(lambda x: embedding_model.encode(x, show_progress_bar=False))
+# The tweet embeddings are: embeddings
 
-topic_keywords = topics_over_time['keywords'].tolist()
+topics_over_time = topic_model.topics_over_time(tweet_text,
+                                                tweet_date,
+                                                global_tuning=True,
+                                                evolution_tuning=True,
+                                                #nr_bins=10
+                                                )  # Total dates
+
+topics_over_time['keywords'] = topics_over_time['Words'].map(lambda x: x.replace(',',''))
+#topics_over_time['topic_vector'] = topics_over_time['keywords'].apply(lambda x: embedding_model.encode(x, show_progress_bar=False))
+
+# Ensure dates are in datetime format (optional, if dates are strings)
+df_data_full['DateTimeStr'] = pd.to_datetime(df_data_full['DateTimeStr'])
+topics_over_time['Timestamp'] = pd.to_datetime(topics_over_time['Timestamp'])
+
+# Merge on two conditions: 'id' and 'date'
+df_data_tweet_keywords = pd.merge(df_data_full,
+                                  topics_over_time,
+                                  left_on=['DateTimeStr', 'Topic'],
+                                  right_on=['Timestamp', 'Topic'],
+                                  how='left')
+
+# Topic embeddings
+topic_keywords = df_data_tweet_keywords['keywords']
 topic_embeddings = embedding_model.encode(topic_keywords, convert_to_tensor=True)
 
+# Sentence embeddings
+original_tweets = df_data_tweet_keywords['tweet_text_clean']
+embeddings.shape
 
-topics_over_time_3 = topics_over_time[["Topic", "Words", "Frequency", "Timestamp"]]
+# Cosine similarity
+cosine_similarities = cosine_similarity(embeddings, topic_embeddings)
+cosine_similarities.shape
 
-# If your sentences are associated with daily timestamps, group the sentences by day and repeat the process for each day
-# Group by day and find top sentences for each topic on each day
-top_sentences_by_day = topics_over_time_3.groupby(["Timestamp", "Topic"]).apply(
-    lambda group: group.nlargest(1, "Frequency")  # Top sentence per topic per day
-)
+diagonal_similarity = np.diagonal(cosine_similarities)
+diagonal_similarity.shape
+type(diagonal_similarity)
 
+df_data_tweet_keywords['cosine_similarity'] = diagonal_similarity.tolist()
 
-top_sentences_by_day = topics_over_time_3.sort_values('Frequency', ascending=False).groupby(["Timestamp", "Topic"]).head(2).sort_index()
+# Tidy up
+df_data_tweet_keywords = df_data_tweet_keywords[['tweet_id','tweet_text_clean','DateTimeStr','Topic','Probability','keywords','Frequency','cosine_similarity']]
+df_data_tweet_keywords = df_data_tweet_keywords[df_data_tweet_keywords['Topic'] >= 0]
 
-similarity_matrix.shape
-
-
-from sklearn.metrics.pairwise import cosine_similarity
-similarity_matrix = cosine_similarity(topic_embeddings, embeddings)
-
-most_similar_sentences = []
-for i, topic in enumerate(topic_keywords):
-    # Find the index of the most similar sentence
-    best_match_idx = similarity_matrix[i].argmax()
-    most_similar_sentences.append({
-        'Topic': topics_over_time.iloc[i]['Topic'],
-        'Time': topics_over_time.iloc[i]['Timestamp'],
-        'Keywords': topic,
-        'Most_Similar_Sentence': tweet_text[best_match_idx],
-        'Similarity_Score': similarity_matrix[i][best_match_idx]
-    })
-
-# Step 6: Create a DataFrame for results
-similarity_df = pd.DataFrame(most_similar_sentences)
-
-print(similarity_df)
+# Get the top x tweets with the maximum topic probability and cosine similarity, 
+# for each date and topic
 
 
-
-
-
-For each day, you now have a mapping of the most similar sentence to each topic
-This allows you to identify which topics were most prominent on a given day and the sentences that best represent them
-
-# Find the most similar topic for each sentence
-most_similar_topics = np.argmax(similarities, axis=1)  # Index of the closest topic for each sentence
-similarity_scores = np.max(similarities, axis=1)       # Corresponding similarity score
-
-most_similar_topics[i] gives the topic ID most similar to sentence i
-similarity_scores[i] provides the similarity score for that match
-
+# Drop outliers
+df_data_full = df_data_full.drop(df_data_full[df_data_full['Topic'] == -1].index)
 
 
 
@@ -612,30 +611,6 @@ similarity_scores[i] provides the similarity score for that match
 # We could ignore the date and just match on embeddings, but makes sense to look at embeddings, date and topic
 # Doing it this way is good because the ebedding model captures the semantic meaning of the topics on that date and for
 # that topic, it also works regardless of the number of keywords or format, as this is a single representation of the keywords
-from sklearn.metrics.pairwise import cosine_similarity
-similarity_matrix = cosine_similarity(topic_embeddings, embeddings)
-
-similarity_matrix.shape
-
-
-
-
-
-
-topic_embeddings.shape
-topic_keywords.shape
-
-
-
-topic_model.get_topic_freq()
-topic_model.c_tf_idf_
-topics_over_time.visualize_term_rank()
-topics_over_time_words = topics_over_time.Words
-topics_over_time
-
-
-topic_model.c_tf_idf_
-
 
 # BERTopic
 # Some interesting functions that may be useful in the future
@@ -662,20 +637,21 @@ topic_model.c_tf_idf_
 # Columns to group by
 cols_group = ['DateTimeStr', 'Topic']
 # Columns to order by, need to add in others, such as text coherance, closest to cluster centre, etc
-cols_order = ['DateTimeStr', 'Topic', 'Probability']
+cols_order = ['DateTimeStr', 'Topic', 'Probability', 'cosine_similarity']
 
 # Order tweets
-df_data_full = df_data_full.sort_values(cols_order, ascending = [True, True, False])
+df_data_tweet_keywords = df_data_tweet_keywords.sort_values(by = cols_order, ascending = [True, True, False, False])
 # Add tweet rank, 1 being the best tweet to include for summarising
-df_data_full['tweet_rank'] = df_data_full.groupby(cols_group)['Topic'].rank(method='first', ascending=False)
-# Drop outliers
-df_data_full = df_data_full.drop(df_data_full[df_data_full['Topic'] == -1].index)
+#df_data_tweet_keywords['Rank'] = df_data_tweet_keywords.groupby(cols_group).cumcount() + 1  # + 1 to start at 1 not 0
+df_data_tweet_keywords['Rank'] = df_data_tweet_keywords.groupby(cols_group)['Topic'].rank(ascending=False, method='first')
+df_data_tweet_keywords['Rank'] = df_data_tweet_keywords.groupby(cols_group)['Probability'].rank(ascending=False, method='first')
+
 # Keep top 3 tweets
-df_data_full = df_data_full.drop(df_data_full[df_data_full['tweet_rank'] > 3].index)
+df_data_tweet_keywords = df_data_tweet_keywords.drop(df_data_tweet_keywords[df_data_tweet_keywords['Rank'] > 3].index)
 
 # Rank the results by Date, Cluster and Similarity, the top N will then be taken for summarisation
 #https://stackoverflow.com/questions/44368537/pandas-groupby-with-delimiter-join
-df_data_full_text = df_data_full.groupby(['DateTimeStr', 'Topic'], as_index = False).agg({'tweet_text_clean': '.'.join})
+df_data_summary = df_data_tweet_keywords.groupby(['DateTimeStr', 'Topic'], as_index = False).agg({'tweet_text_clean': '. '.join})
 
 #https://medium.com/artificialis/t5-for-text-summarization-in-7-lines-of-code-b665c9e40771
 model_id = 't5-small'
@@ -707,7 +683,7 @@ summarise_text("")
 
 # Both of the below does the same, summarises the tweets
 #df_data_full_text['TweetSummary'] = df_data_full_text['tweet_text_clean'].apply(summarise_text)
-df_data_full_text['tweet_summary'] = df_data_full_text.apply(lambda row: summarise_text(row['tweet_text_clean']),axis=1)
+df_data_summary['tweet_summary'] = df_data_summary.apply(lambda row: summarise_text(row['tweet_text_clean']),axis=1)
 
 
 
@@ -968,7 +944,7 @@ print_person(**dict_test_1)
 dict_test_1 = dict_format[1]['dialog']['turns']
 df = pd.DataFrame(dict_test_1)
 
-df_conversation_final2 = pd.concat([df_conversation_final['conversation_customer'],df_conversation_final['conversation_abstractive_customer']],axis = 1) # Get the columns needed for training, this is conversation and the abstractive conversation
+df_conversation_final2 = pd.concat([df_conversation_final['conversation'],df_conversation_final['conversation_abstractive']],axis = 1) # Get the columns needed for training, this is conversation and the abstractive conversation
 train_data, val_data = train_test_split(df_conversation_final2, test_size=0.1) # Split into training and test data
 
 train_dataset = Dataset.from_pandas(train_data)
@@ -994,7 +970,7 @@ model = T5ForConditionalGeneration.from_pretrained(model_id) # Loads the pre-tra
 
 # Function to convert text data into model inputs and targets
 def preprocess_data(examples):
-    inputs = ["summarize: " + doc for doc in examples["conversation_customer"]]
+    inputs = ["summarize: " + doc for doc in examples["conversation"]]
     model_inputs = tokenizer(inputs,
                              max_length=512,
                              truncation=True,
@@ -1004,7 +980,7 @@ def preprocess_data(examples):
     # Tokenize summaries (labels)
     with tokenizer.as_target_tokenizer():
         # targets = [summary for summary in examples['summaries'] # could put the targets here as above and then replace examples["conversation_abstractive"]
-        labels = tokenizer(examples["conversation_abstractive_customer"],
+        labels = tokenizer(examples["conversation_abstractive"],
                            max_length=150,
                            truncation=True,
                            padding=True
@@ -1069,7 +1045,7 @@ def summarize(text):
 test_text = "Great tale from : Canada firefighters battled blaze as own homes burned down.SK Wildfire update: There are  fires currently burning. The fire risk remains severe..I dont understand this. , Canadians internally displaced and homeless, fires not yet under control. cdnpoli"
 print(summarize(test_text))
 
-df_data_full_text['tweet_summary_samsum_tuned_cus'] = df_data_full_text.apply(lambda row: summarize(row['tweet_text_clean']),axis=1)
+df_data_summary['tweet_summary_tuned'] = df_data_summary.apply(lambda row: summarize(row['tweet_text_clean']),axis=1)
 
 
 
